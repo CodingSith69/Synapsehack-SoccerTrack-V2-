@@ -1,0 +1,215 @@
+base_path: "."
+interim_data_path: "${base_path}/data/interim"
+
+log_level: "INFO"
+match:
+  id: "117093"
+  first_frame_only: false
+  event_period: FIRST_HALF
+
+pitch_length: 105  # meters
+pitch_width: 68  # meters
+
+visualization:
+  team_colors:
+    9701: [255, 0, 0]    # Red for team 1
+    9834: [0, 0, 255]    # Blue for team 2
+    ball: [0, 255, 0]    # Green for ball
+  track_colors: {}       # Will be populated dynamically
+  point_sizes:
+    player: 5
+    ball: 3
+
+ball_tracking:
+
+  data: # shared between dataset and datamodule
+    frame_size: [1280, 720]  # [width, height]
+    num_frame: 3
+    frame_stride: 1      # Stride between frames within a sequence
+    sequence_stride: 30  # Stride between different sequences
+    mag: 1.0
+    sigma: 2.5
+    video_paths: ["/data/share/teamtrack/teamtrack-mot/soccer_side/full/combined.mp4"]
+    mot_paths: ["/data/share/teamtrack/teamtrack-mot/soccer_side/full/combined.txt"]
+    output_dir: "${interim_data_path}/ball_tracking_dataset-stride-1"
+    data_dir: "${ball_tracking.data.output_dir}"
+    class_names: ["ball"]
+    splits:
+      train: 0.95   # 95% for training
+      val: 0.025   # 2.5% for validation
+      test: 0.025   # 2.5% for testing
+    min_visibility: 0.3
+    copy_files: true
+    max_num_sequences: 1000
+    num_workers: 16
+    batch_size: 4
+    downscale_factor: 2
+    # Data augmentation
+    augmentation:
+      enabled: true  # Master switch for all augmentations
+      transforms:
+        resize:
+          enabled: false # dont use. precompute resizes if possible
+          height: null  # Will use original height if null
+          width: null   # Will use original width if null
+        random_crop:
+          enabled: true  # Only applied during training
+          height: 480
+          width: 480
+          include_object_prob: 1.0 # other than 1.0 breaks
+        horizontal_flip:
+          enabled: true  # Only applied during training
+          prob: 0.5
+
+  train:
+    # Model configuration
+    model_name: "TrackNetV2"
+    num_frame: ${ball_tracking.data.num_frame}
+    input_type: "2d"
+    in_channels: 9 #${defaults.sequence.num_frame * 3}  # num_frame * RGB channels
+    out_channels: ${ball_tracking.data.num_frame}
+    
+    # Training parameters
+    epochs: 300
+    learning_rate: 0.001
+    tolerance: 4
+    save_dir: "exp-stride=1-weighted_msee"
+    debug: false
+    data_dir: "${interim_data_path}/ball_tracking_dataset-stride-1"
+    devices: [0]
+    early_stop_patience: 50
+    
+    # Loss configuration
+    main_loss: "weighted_mse"  # choices: weighted_bce, focal_wbce, kl_div, bce
+    auxiliary_losses: ["tv"]     # choices: tv, jaccard, dice
+    auxiliary_weights: [0.1]
+        
+  # Wandb logging
+  wandb:
+    project: "TrackNetX"
+    entity: null  # Use default
+    run_name: null  # Auto-generate
+
+video:
+  calibrated_videos: "${base_path}/data/raw/${match.id}/${match.id}_panorama.mp4"
+  homography: "${interim_data_path}/homography/${match.id}/${match.id}_homography.npy"
+  output_folder: "${interim_data_path}/annotated_videos/${match.id}/"
+
+coordinates:
+  path: "${interim_data_path}/pitch_plane_coordinates/${match.id}/${match.id}_pitch_plane_coordinates.csv"
+
+plot_coordinates_on_video:
+  coordinates_path: ${coordinates.path}
+  video_path: ${video.calibrated_videos}
+  match_id: ${match.id}
+  output_path: "${interim_data_path}/annotated_videos/${match.id}/${match.id}_plot_coordinates_on_video.mp4"
+  first_frame_only: ${match.first_frame_only}
+  colors: ${visualization.team_colors}
+  point_sizes: ${visualization.point_sizes}
+
+plot_bboxes_on_video:
+  video_path: ${video.calibrated_videos}
+  # detections_path: "${interim_data_path}/${match.id}/${match.id}_panorama_test_detections.csv"
+  detections_path: "${interim_data_path}/${match.id}/${match.id}_ground_truth_mot.csv"
+  match_id: ${match.id}
+  output_path: "${interim_data_path}/${match.id}/${match.id}_plot_bboxes_on_video-ground_truth_mot.mp4"
+  first_frame_only: ${match.first_frame_only}
+  team_colors: ${visualization.team_colors}
+  track_colors: ${visualization.track_colors}
+  classes: ["person"]
+
+detect_objects:
+  weights_path: "${base_path}/models/model=yolov8m-imgsz=2048.pt"
+  imgsz: 5000
+  conf: 0.4
+  iou: 0.7
+  video_path: ${video.calibrated_videos}
+  tracker_config:
+    tracker_type: "botsort"
+    track_high_thresh: 0.25
+    track_low_thresh: 0.1
+    new_track_thresh: 0.25
+    track_buffer: 30
+    match_thresh: 0.8
+    fuse_score: true
+    gmc_method: "sparseOptFlow"
+    proximity_thresh: 0.5
+    appearance_thresh: 0.25
+    with_reid: false
+
+create_ground_truth_mot:
+  match_id: ${match.id}
+  detections_path: "${interim_data_path}/${match.id}/${match.id}_panorama_test_detections.csv"
+  coordinates_path: ${coordinates.path}
+  homography_path: ${video.homography}
+  event_period: ${match.event_period}
+  output_path: "${interim_data_path}/${match.id}/${match.id}_ground_truth_mot.csv"
+  max_distance: 5.0
+  conf_threshold: 0.3
+  max_interpolation_gap: 10
+  association_window_size: 30
+  max_refinement_iterations: 5
+  error_threshold: 50.0
+  pitch_length: ${pitch_length}
+  pitch_width: ${pitch_width}
+
+create_yolo_dataset:
+  video_path: "/data/share/teamtrack/teamtrack-mot/soccer_side/full/combined.mp4"
+  mot_path: "/data/share/teamtrack/teamtrack-mot/soccer_side/full/gt.txt"
+  output_dir: "/home/atom/SoccerTrack-v2/data/v1"
+  frame_interval: 1000
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  overwrite: true
+
+log_string:
+  string: "Hello, world!"
+
+# Video preprocessing
+trim_video_into_halves:
+  padding_frames: 30  # Number of frames to pad at start/end of each half
+
+# Coordinate conversion
+convert_raw_to_pitch_plane:
+  pitch_length: 105.0  # meters
+  pitch_width: 68.0   # meters
+
+# Camera calibration
+generate_calibration_mappings:
+  min_matches: 10
+  ransac_threshold: 3.0
+  confidence: 0.99
+
+calibrate_camera:
+  interpolation: cubic  # Options: linear, cubic
+
+# Coordinate projection
+convert_pitch_plane_to_image_plane:
+  calibrated: true  # Whether to use calibrated or distorted coordinates
+
+# # Object detection
+# detect_objects:
+#   conf: 0.25        # Confidence threshold
+#   iou: 0.45         # IOU threshold
+#   imgsz: 640        # Input image size
+#   tracker_config: "@configs/tracker_config.yaml"
+
+# # Visualization
+# plot_coordinates_on_video:
+#   colors:
+#     ball: [255, 0, 0]    # Red
+#     "9701": [0, 0, 255]  # Blue
+#     "9834": [0, 255, 0]  # Green
+#   point_sizes:
+#     ball: 3
+#     player: 5
+
+# plot_bboxes_on_video:
+#   colors:
+#     ball: [255, 0, 0]    # Red
+#     "9701": [0, 0, 255]  # Blue
+#     "9834": [0, 255, 0]  # Green
+#   line_thickness: 2
+#   font_size: 1.0
+#   show_ids: true
